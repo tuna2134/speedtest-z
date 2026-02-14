@@ -163,10 +163,10 @@ class SpeedtestZ:
             self.context = self.browser.new_context(
                 viewport={"width": self.WINDOW_WIDTH, "height": self.WINDOW_HEIGHT}
             )
-            self.context.set_default_timeout(60000)  # 60秒
+            self.context.set_default_timeout(self.timeout * 1000)  # ミリ秒に変換
             
             self.page = self.context.new_page()
-            self.page.set_default_timeout(self.timeout * 1000)  # ミリ秒に変換
+            # ページのタイムアウトはコンテキストから継承される
 
             if not self.headless:
                 # ウィンドウ位置の設定はPlaywrightでは制限があるため、可能な範囲で対応
@@ -686,7 +686,6 @@ class SpeedtestZ:
                             try:
                                 search_box = self.page.locator("#host-search")
                                 search_box.wait_for(state="visible", timeout=self.timeout * 1000)
-                                search_box.fill("")
                                 search_box.fill(self.ookla_server)
                                 self.page.locator('//*[@id="find-servers"]//ul/li/a').first.wait_for(
                                     state="visible", timeout=self.timeout * 1000
