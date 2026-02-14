@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 authors = [
     {name = "AIKAWA Shigechika"},
 ]
-keywords = ["speedtest", "selenium", "zabbix", "monitoring", "network"]
+keywords = ["speedtest", "playwright", "zabbix", "monitoring", "network"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: System Administrators",
@@ -27,7 +27,7 @@ classifiers = [
     "Topic :: System :: Networking",
 ]
 dependencies = [
-    "selenium",
+    "playwright",
     "zappix",
 ]
 

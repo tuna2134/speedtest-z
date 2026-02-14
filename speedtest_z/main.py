@@ -14,17 +14,8 @@ import locale
 import re
 import platform
 
-# Selenium Imports
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.common.exceptions import (
-    TimeoutException,
-    NoSuchElementException,
-    StaleElementReferenceException,
-)
+# Playwright Imports
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # Zabbix Imports
 from zappix.sender import Sender, SenderData
@@ -144,8 +135,8 @@ class SpeedtestZ:
         if self.snapshot_enable and not os.path.exists(self.snapshot_dir):
             os.makedirs(self.snapshot_dir)
 
-        # WebDriver の初期化
-        self._init_driver()
+        # Playwright の初期化
+        self._init_browser()
 
         # SIGTERM ハンドリング
         signal.signal(signal.SIGTERM, self._handle_sigterm)
@@ -156,42 +147,38 @@ class SpeedtestZ:
         self.close()
         sys.exit(0)
 
-    def _init_driver(self):
-        """Chrome Driver の初期化"""
-        logger.info("Initializing Chrome WebDriver...")
-
-        options = webdriver.ChromeOptions()
-
-        if self.headless:
-            options.add_argument("--headless")
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--disable-gpu")
-
-        options.add_argument(
-            f"--window-size={self.WINDOW_WIDTH},{self.WINDOW_HEIGHT}"
-        )
-        options.add_argument("--log-level=3")
+    def _init_browser(self):
+        """Playwright Browser の初期化"""
+        logger.info("Initializing Playwright Browser (Chromium)...")
 
         try:
-            self.driver = webdriver.Chrome(options=options)
-            self.driver.set_page_load_timeout(60)
-
-            self.wait = WebDriverWait(self.driver, self.timeout)
-            self.action_chains = ActionChains(self.driver)
+            self.playwright = sync_playwright().start()
+            self.browser = self.playwright.chromium.launch(
+                headless=self.headless,
+                args=[
+                    f"--window-size={self.WINDOW_WIDTH},{self.WINDOW_HEIGHT}",
+                ]
+            )
+            
+            self.context = self.browser.new_context(
+                viewport={"width": self.WINDOW_WIDTH, "height": self.WINDOW_HEIGHT}
+            )
+            self.context.set_default_timeout(self.timeout * 1000)  # ミリ秒に変換
+            
+            self.page = self.context.new_page()
+            # ページのタイムアウトはコンテキストから継承される
 
             if not self.headless:
-                self.driver.set_window_size(self.WINDOW_WIDTH, self.WINDOW_HEIGHT)
+                # ウィンドウ位置の設定はPlaywrightでは制限があるため、可能な範囲で対応
                 pos = self._get_window_position()
                 if pos:
-                    self.driver.set_window_position(*pos)
-                    logger.info(f"Window moved to Top-Right: {pos}")
+                    logger.info(f"Window position (note: Playwright has limited window positioning): {pos}")
 
         except Exception as e:
             logger.error(
-                f"Chrome WebDriver の初期化に失敗しました: {e}\n"
-                "  Google Chrome がインストールされているか確認してください。\n"
-                "  https://www.google.com/chrome/"
+                f"Playwright Browser の初期化に失敗しました: {e}\n"
+                "  Playwright ブラウザがインストールされているか確認してください。\n"
+                "  インストール: python -m playwright install chromium"
             )
             sys.exit(1)
 
@@ -220,9 +207,13 @@ class SpeedtestZ:
 
     def close(self):
         """ブラウザ終了処理"""
-        if hasattr(self, "driver"):
+        if hasattr(self, "context"):
             logger.info("Closing browser session...")
-            self.driver.quit()
+            self.context.close()
+        if hasattr(self, "browser"):
+            self.browser.close()
+        if hasattr(self, "playwright"):
+            self.playwright.stop()
 
     def take_snapshot(self, filename_base):
         """スクリーンショット保存"""
@@ -232,7 +223,7 @@ class SpeedtestZ:
         try:
             filename = f"{filename_base}.png"
             filepath = os.path.join(self.snapshot_dir, filename)
-            self.driver.save_screenshot(filepath)
+            self.page.screenshot(path=filepath)
             logger.debug(f"Snapshot saved: {filename}")
         except Exception as e:
             logger.warning(f"Failed to take snapshot: {e}")
@@ -290,9 +281,7 @@ class SpeedtestZ:
     def _get_position_via_driver(self) -> tuple:
         """macOS/Windows 用: JavaScript で画面幅を取得"""
         try:
-            screen_width = self.driver.execute_script(
-                "return window.screen.availWidth"
-            )
+            screen_width = self.page.evaluate("window.screen.availWidth")
             if screen_width:
                 x_pos = max(0, screen_width - self.WINDOW_WIDTH)
                 return (x_pos, 0)
@@ -311,9 +300,9 @@ class SpeedtestZ:
 
         for attempt in range(max_retries):
             try:
-                self.driver.get(url)
+                self.page.goto(url, wait_until="load")
                 time.sleep(2)
-                page = self.driver.page_source.lower()
+                page = self.page.content().lower()
                 error_indicators = [
                     "can't be reached",
                     "err_",
@@ -352,20 +341,15 @@ class SpeedtestZ:
 
             try:
                 time.sleep(5)
-                start_btn = WebDriverWait(self.driver, 10).until(
-                    EC.element_to_be_clickable(
-                        (By.XPATH, "//button[contains(., 'Start')]")
-                    )
-                )
+                start_btn = self.page.locator("//button[contains(., 'Start')]")
+                start_btn.wait_for(state="visible", timeout=10000)
                 start_btn.click()
                 logger.info("cloudflare: 'Start' button clicked")
 
-                WebDriverWait(self.driver, 10).until(
-                    EC.invisibility_of_element(start_btn)
-                )
+                start_btn.wait_for(state="hidden", timeout=10000)
                 logger.info("cloudflare: Test started")
 
-            except TimeoutException:
+            except PlaywrightTimeoutError:
                 logger.warning("cloudflare: Start button issue. Continuing...")
             except Exception as e:
                 logger.warning(f"cloudflare: Error clicking Start button: {e}")
@@ -373,14 +357,12 @@ class SpeedtestZ:
             logger.debug("cloudflare: Measuring... (Waiting for Quality Scores)")
 
             try:
-                WebDriverWait(self.driver, 90).until(
-                    EC.presence_of_element_located(
-                        (By.XPATH, "//div[contains(text(), 'Video Streaming')]")
-                    )
+                self.page.locator("//div[contains(text(), 'Video Streaming')]").wait_for(
+                    state="visible", timeout=90000
                 )
                 logger.info("cloudflare: COMPLETED (Quality Scores appeared)")
                 time.sleep(3)
-            except TimeoutException:
+            except PlaywrightTimeoutError:
                 logger.warning("cloudflare: Timeout waiting for completion.")
                 self.take_snapshot("cloudflare_timeout")
 
@@ -388,16 +370,12 @@ class SpeedtestZ:
 
                 def extract_by_label(label_text, unit_pattern=r"Mbps|ms|μs|us"):
                     try:
-                        label_el = self.driver.find_element(
-                            By.XPATH, f"//div[text()='{label_text}']"
-                        )
-                        parent = label_el.find_element(By.XPATH, "./..")
-                        text_content = parent.text
+                        label_el = self.page.locator(f"//div[text()='{label_text}']")
+                        parent = label_el.locator("..")
+                        text_content = parent.text_content()
 
                         if not any(char.isdigit() for char in text_content):
-                            text_content = parent.find_element(
-                                By.XPATH, "./.."
-                            ).text
+                            text_content = parent.locator("..").text_content()
 
                         if label_text in text_content:
                             parts = text_content.split(label_text)
@@ -422,7 +400,7 @@ class SpeedtestZ:
                                 return f"{value:.3f}"
                             return f"{value}"
 
-                    except (NoSuchElementException, Exception):
+                    except Exception:
                         pass
                     return ""
 
@@ -484,10 +462,9 @@ class SpeedtestZ:
                 return
 
             try:
-                more_btn = self.wait.until(
-                    EC.element_to_be_clickable((By.ID, "show-more-details-link"))
-                )
-                self.driver.execute_script("arguments[0].click();", more_btn)
+                more_btn = self.page.locator("#show-more-details-link")
+                more_btn.wait_for(state="visible", timeout=self.timeout * 1000)
+                more_btn.evaluate("el => el.click()")
                 logger.info("netflix: MORE INFO CLICKED")
             except Exception as e:
                 logger.error(f"netflix: Failed to click more details: {e}")
@@ -495,25 +472,21 @@ class SpeedtestZ:
                 return
 
             try:
-                WebDriverWait(self.driver, 90).until(
-                    EC.presence_of_element_located(
-                        (By.CSS_SELECTOR, "#speed-progress-indicator.succeeded")
-                    )
+                self.page.locator("#speed-progress-indicator.succeeded").wait_for(
+                    state="visible", timeout=90000
                 )
                 time.sleep(1)
                 logger.info("netflix: COMPLETED (succeeded class detected)")
-            except TimeoutException:
+            except PlaywrightTimeoutError:
                 logger.error("netflix: Timeout waiting for results.")
                 self.take_snapshot("netflix_timeout")
                 return
 
             try:
-                download = self.driver.find_element(By.ID, "speed-value").text
-                upload = self.driver.find_element(By.ID, "upload-value").text
-                latency = self.driver.find_element(By.ID, "latency-value").text
-                server_locations = self.driver.find_element(
-                    By.ID, "server-locations"
-                ).text
+                download = self.page.locator("#speed-value").text_content()
+                upload = self.page.locator("#upload-value").text_content()
+                latency = self.page.locator("#latency-value").text_content()
+                server_locations = self.page.locator("#server-locations").text_content()
 
                 logger.debug(
                     f"netflix: Result: {download=} {upload=} {latency=}"
@@ -544,7 +517,7 @@ class SpeedtestZ:
                 ]
                 self.send_to_zabbix(data)
 
-            except NoSuchElementException as e:
+            except Exception as e:
                 logger.error(f"netflix: Result elements not found. {e}")
                 return
 
@@ -566,9 +539,8 @@ class SpeedtestZ:
 
             time.sleep(3)
             try:
-                start_btn = self.wait.until(
-                    EC.element_to_be_clickable((By.ID, "run-test"))
-                )
+                start_btn = self.page.locator("#run-test")
+                start_btn.wait_for(state="visible", timeout=self.timeout * 1000)
                 start_btn.click()
                 logger.info("google: Initial Start Clicked")
             except Exception as e:
@@ -577,51 +549,47 @@ class SpeedtestZ:
                 return
 
             try:
-                continue_btn = WebDriverWait(self.driver, 5).until(
-                    EC.element_to_be_clickable(
-                        (By.CSS_SELECTOR, ".actionButton-confirmSpeedtest")
-                    )
-                )
+                continue_btn = self.page.locator(".actionButton-confirmSpeedtest")
+                continue_btn.wait_for(state="visible", timeout=5000)
                 continue_btn.click()
                 logger.info("google: Popup 'CONTINUE' Clicked")
-            except TimeoutException:
+            except PlaywrightTimeoutError:
                 pass
             except Exception as e:
                 logger.warning(f"google: Popup handling warning: {e}")
 
             logger.info("google: Measuring...")
 
-            def _google_finished(d):
+            def _google_finished():
                 try:
-                    download = d.find_element(
-                        By.CSS_SELECTOR, "span[name='downloadSpeedMbps']"
-                    ).text
-                    upload = d.find_element(
-                        By.CSS_SELECTOR, "span[name='uploadSpeedMbps']"
-                    ).text
+                    download = self.page.locator("span[name='downloadSpeedMbps']").text_content()
+                    upload = self.page.locator("span[name='uploadSpeedMbps']").text_content()
                     return download and upload and any(c.isdigit() for c in download) and any(c.isdigit() for c in upload)
                 except Exception:
                     return False
 
             try:
-                WebDriverWait(self.driver, 60).until(_google_finished)
+                # Playwrightでカスタム条件待機を実装
+                timeout_ms = 60000
+                start_time = time.time()
+                while time.time() - start_time < timeout_ms / 1000:
+                    if _google_finished():
+                        break
+                    time.sleep(1)
+                else:
+                    raise PlaywrightTimeoutError("Timeout waiting for google results")
+                    
                 time.sleep(3)
                 logger.info("google: COMPLETED")
-            except TimeoutException:
+            except PlaywrightTimeoutError:
                 logger.error("google: Timeout waiting for results.")
                 self.take_snapshot("google_timeout")
                 return
 
             try:
-                download = self.driver.find_element(
-                    By.CSS_SELECTOR, "span[name='downloadSpeedMbps']"
-                ).text
-                upload = self.driver.find_element(
-                    By.CSS_SELECTOR, "span[name='uploadSpeedMbps']"
-                ).text
-                ping = self.driver.find_element(
-                    By.CSS_SELECTOR, "span[name='ping']"
-                ).text
+                download = self.page.locator("span[name='downloadSpeedMbps']").text_content()
+                upload = self.page.locator("span[name='uploadSpeedMbps']").text_content()
+                ping = self.page.locator("span[name='ping']").text_content()
 
                 logger.debug(f"google: Result: {download=} {upload=} {ping=}")
 
@@ -666,34 +634,28 @@ class SpeedtestZ:
 
                 if attempt > 0:
                     logger.info("ookla: Reloading page...")
-                    self.driver.refresh()
+                    self.page.reload()
                     time.sleep(5)
                 else:
                     if not self._load_with_retry("https://www.speedtest.net/"):
                         return
 
                 try:
-                    consent = self.wait.until(
-                        EC.element_to_be_clickable(
-                            (By.ID, "onetrust-accept-btn-handler")
-                        )
-                    )
-                    self.driver.execute_script("arguments[0].click();", consent)
-                except TimeoutException:
+                    consent = self.page.locator("#onetrust-accept-btn-handler")
+                    consent.wait_for(state="visible", timeout=self.timeout * 1000)
+                    consent.evaluate("el => el.click()")
+                except PlaywrightTimeoutError:
                     pass
 
                 # Server Selection
                 if self.ookla_server is not None:
                     need_change = True
                     try:
-                        curr_srv_elem = WebDriverWait(self.driver, 10).until(
-                            EC.visibility_of_element_located(
-                                (By.CLASS_NAME, "hostUrl")
-                            )
-                        )
-                        if self.ookla_server in curr_srv_elem.text:
+                        curr_srv_elem = self.page.locator(".hostUrl")
+                        curr_srv_elem.wait_for(state="visible", timeout=10000)
+                        if self.ookla_server in curr_srv_elem.text_content():
                             logger.info(
-                                f"ookla: Server match ({curr_srv_elem.text})."
+                                f"ookla: Server match ({curr_srv_elem.text_content()})."
                             )
                             need_change = False
                     except Exception:
@@ -704,11 +666,8 @@ class SpeedtestZ:
                         is_success = False
                         for _ in range(3):
                             try:
-                                xp = self.wait.until(
-                                    EC.element_to_be_clickable(
-                                        (By.LINK_TEXT, "Change Server")
-                                    )
-                                )
+                                xp = self.page.get_by_text("Change Server", exact=True)
+                                xp.wait_for(state="visible", timeout=self.timeout * 1000)
                                 xp.click()
                                 is_success = True
                                 break
@@ -717,42 +676,25 @@ class SpeedtestZ:
 
                         if not is_success:
                             try:
-                                xp = self.driver.find_element(
-                                    By.XPATH,
-                                    "//a[contains(text(), 'Change Server')]",
-                                )
-                                self.driver.execute_script(
-                                    "arguments[0].click();", xp
-                                )
+                                xp = self.page.locator("//a[contains(text(), 'Change Server')]")
+                                xp.evaluate("el => el.click()")
                                 is_success = True
                             except Exception:
                                 pass
 
                         if is_success:
                             try:
-                                search_box = self.wait.until(
-                                    EC.visibility_of_element_located(
-                                        (By.ID, "host-search")
-                                    )
-                                )
-                                search_box.clear()
-                                search_box.send_keys(self.ookla_server)
-                                self.wait.until(
-                                    EC.presence_of_element_located(
-                                        (
-                                            By.XPATH,
-                                            '//*[@id="find-servers"]//ul/li/a',
-                                        )
-                                    )
+                                search_box = self.page.locator("#host-search")
+                                search_box.wait_for(state="visible", timeout=self.timeout * 1000)
+                                search_box.fill(self.ookla_server)
+                                self.page.locator('//*[@id="find-servers"]//ul/li/a').first.wait_for(
+                                    state="visible", timeout=self.timeout * 1000
                                 )
                                 time.sleep(1)
-                                server_list = self.driver.find_elements(
-                                    By.XPATH,
-                                    '//*[@id="find-servers"]//ul/li/a',
-                                )
+                                server_list = self.page.locator('//*[@id="find-servers"]//ul/li/a').all()
                                 target_found = False
                                 for item in server_list:
-                                    if self.ookla_server in item.text:
+                                    if self.ookla_server in item.text_content():
                                         item.click()
                                         target_found = True
                                         break
@@ -764,38 +706,26 @@ class SpeedtestZ:
                                 )
 
                 try:
-                    start_btn = self.wait.until(
-                        EC.element_to_be_clickable(
-                            (By.CLASS_NAME, "start-text")
-                        )
-                    )
+                    start_btn = self.page.locator(".start-text")
+                    start_btn.wait_for(state="visible", timeout=self.timeout * 1000)
                     start_btn.click()
                     logger.info("ookla: START")
                 except Exception as e:
                     logger.warning(f"ookla: Start button error: {e}")
                     continue
 
-                def _check_result_or_error(d):
+                def _check_result_or_error():
                     try:
                         try:
-                            if d.find_element(
-                                By.CSS_SELECTOR,
-                                ".error-container, .notification-error",
-                            ).is_displayed():
+                            if self.page.locator(".error-container, .notification-error").is_visible():
                                 return "ERROR"
-                        except NoSuchElementException:
+                        except Exception:
                             pass
 
                         try:
-                            if d.find_element(
-                                By.CLASS_NAME, "result-data-large"
-                            ).is_displayed():
-                                dl = d.find_element(
-                                    By.CLASS_NAME, "download-speed"
-                                ).text
-                                ul = d.find_element(
-                                    By.CLASS_NAME, "upload-speed"
-                                ).text
+                            if self.page.locator(".result-data-large").is_visible():
+                                dl = self.page.locator(".download-speed").text_content()
+                                ul = self.page.locator(".upload-speed").text_content()
                                 if (
                                     dl
                                     and ul
@@ -803,17 +733,24 @@ class SpeedtestZ:
                                     and ul not in ["—", "-"]
                                 ):
                                     return "SUCCESS"
-                        except NoSuchElementException:
+                        except Exception:
                             pass
-                    except StaleElementReferenceException:
+                    except Exception:
                         pass
                     return False
 
                 try:
-                    status = WebDriverWait(self.driver, 90).until(
-                        _check_result_or_error
-                    )
-                except TimeoutException:
+                    # Playwrightでカスタム条件待機を実装
+                    timeout_ms = 90000
+                    start_time = time.time()
+                    while time.time() - start_time < timeout_ms / 1000:
+                        status = _check_result_or_error()
+                        if status:
+                            break
+                        time.sleep(1)
+                    else:
+                        status = "TIMEOUT"
+                except Exception:
                     logger.error("ookla: Timeout waiting for results.")
                     status = "TIMEOUT"
 
@@ -828,15 +765,9 @@ class SpeedtestZ:
                 logger.info("ookla: COMPLETED")
                 time.sleep(2)
 
-                download = self.driver.find_element(
-                    By.CLASS_NAME, "download-speed"
-                ).text
-                upload = self.driver.find_element(
-                    By.CLASS_NAME, "upload-speed"
-                ).text
-                ping = self.driver.find_element(
-                    By.CLASS_NAME, "ping-speed"
-                ).text
+                download = self.page.locator(".download-speed").text_content()
+                upload = self.page.locator(".upload-speed").text_content()
+                ping = self.page.locator(".ping-speed").text_content()
 
                 logger.debug(f"ookla Result: {download=} {upload=} {ping=}")
 
@@ -879,13 +810,13 @@ class SpeedtestZ:
         )
         for _ in range(12):
             try:
-                element = self.driver.find_element(By.XPATH, xpath)
-                current_value = element.text.strip()
+                element = self.page.locator(xpath)
+                current_value = element.text_content().strip()
                 if current_value and current_value == last_value:
                     logger.info(f"Stability reached: {current_value}")
                     return
                 last_value = current_value
-            except NoSuchElementException:
+            except Exception:
                 pass
             time.sleep(5)
         logger.warning("Timeout or not stabilized.")
@@ -906,10 +837,9 @@ class SpeedtestZ:
 
             for i in range(5):
                 try:
-                    toggle_btn = self.wait.until(
-                        EC.element_to_be_clickable((By.XPATH, toggle_xpath))
-                    )
-                    current_text = toggle_btn.text
+                    toggle_btn = self.page.locator(toggle_xpath)
+                    toggle_btn.wait_for(state="visible", timeout=self.timeout * 1000)
+                    current_text = toggle_btn.text_content()
                     if target_label in current_text:
                         logger.info(
                             f"boxtest: Target size reached: {current_text}"
@@ -924,9 +854,7 @@ class SpeedtestZ:
             self.wait_for_stability()
 
             try:
-                go_btn = self.driver.find_element(
-                    By.XPATH, "//button[contains(text(), 'Go!')]"
-                )
+                go_btn = self.page.locator("//button[contains(text(), 'Go!')]")
                 go_btn.click()
                 logger.info("boxtest: START")
             except Exception as e:
@@ -938,19 +866,26 @@ class SpeedtestZ:
                 "//div[@id='pop-test-manager']//table/tbody/tr/td[5]"
             )
 
-            def _box_finished(d):
+            def _box_finished():
                 try:
-                    txt = d.find_element(By.XPATH, upload_speed_xpath).text.strip()
+                    txt = self.page.locator(upload_speed_xpath).text_content().strip()
                     return len(txt) > 0 and any(c.isdigit() for c in txt)
                 except Exception:
                     return False
 
             try:
-                WebDriverWait(self.driver, self.BOXTEST_TIMEOUT).until(
-                    _box_finished
-                )
+                # Playwrightでカスタム条件待機を実装
+                timeout_ms = self.BOXTEST_TIMEOUT * 1000
+                start_time = time.time()
+                while time.time() - start_time < timeout_ms / 1000:
+                    if _box_finished():
+                        break
+                    time.sleep(1)
+                else:
+                    raise PlaywrightTimeoutError("Timeout waiting for boxtest results")
+                    
                 logger.info("boxtest: COMPLETED")
-            except TimeoutException:
+            except PlaywrightTimeoutError:
                 logger.error("boxtest: Timeout waiting for results.")
                 self.take_snapshot("boxtest_timeout")
                 return
@@ -981,7 +916,7 @@ class SpeedtestZ:
 
             for key_suffix, xpath in string_items.items():
                 try:
-                    val = self.driver.find_element(By.XPATH, xpath).text.strip()
+                    val = self.page.locator(xpath).text_content().strip()
                     if val:
                         data.append(
                             {
@@ -990,8 +925,6 @@ class SpeedtestZ:
                                 "value": val,
                             }
                         )
-                except NoSuchElementException:
-                    logger.warning(f"boxtest: Element not found: {key_suffix}")
                 except Exception as e:
                     logger.warning(
                         f"boxtest: Error processing {key_suffix}: {e}"
@@ -999,7 +932,7 @@ class SpeedtestZ:
 
             for key_suffix, xpath in numeric_items.items():
                 try:
-                    val = self.driver.find_element(By.XPATH, xpath).text
+                    val = self.page.locator(xpath).text_content()
                     clean_val = (
                         val.replace("Avg:", "")
                         .replace("ms", "")
@@ -1013,8 +946,6 @@ class SpeedtestZ:
                             "value": clean_val,
                         }
                     )
-                except NoSuchElementException:
-                    logger.warning(f"boxtest: Element not found: {key_suffix}")
                 except Exception as e:
                     logger.warning(
                         f"boxtest: Error processing {key_suffix}: {e}"
@@ -1040,20 +971,16 @@ class SpeedtestZ:
                 return
 
             try:
-                chk_box = self.wait.until(
-                    EC.presence_of_element_located((By.ID, "demo-human"))
-                )
-                self.driver.execute_script("arguments[0].click();", chk_box)
+                chk_box = self.page.locator("#demo-human")
+                chk_box.wait_for(state="visible", timeout=self.timeout * 1000)
+                chk_box.evaluate("el => el.click()")
                 logger.info("mlab: Consent Checked")
-            except TimeoutException:
+            except PlaywrightTimeoutError:
                 pass
 
             try:
-                start_btn = self.wait.until(
-                    EC.element_to_be_clickable(
-                        (By.CSS_SELECTOR, "a.startButton")
-                    )
-                )
+                start_btn = self.page.locator("a.startButton")
+                start_btn.wait_for(state="visible", timeout=self.timeout * 1000)
                 start_btn.click()
                 logger.info("mlab: START")
             except Exception as e:
@@ -1063,13 +990,11 @@ class SpeedtestZ:
 
             logger.info("mlab: Waiting for finish (approx 45s)...")
             try:
-                WebDriverWait(self.driver, 90).until(
-                    EC.visibility_of_element_located(
-                        (By.XPATH, "//span[contains(text(), 'Again')]")
-                    )
+                self.page.locator("//span[contains(text(), 'Again')]").wait_for(
+                    state="visible", timeout=90000
                 )
                 logger.info("mlab: COMPLETED")
-            except TimeoutException:
+            except PlaywrightTimeoutError:
                 logger.error("mlab: Timeout waiting for results.")
                 self.take_snapshot("mlab_timeout")
                 return
@@ -1077,21 +1002,13 @@ class SpeedtestZ:
             base_xp = '//*[@id="measurementSpace"]//table/tbody'
 
             try:
-                raw_dl = self.driver.find_element(
-                    By.XPATH, f"{base_xp}/tr[3]/td[3]/strong"
-                ).text
+                raw_dl = self.page.locator(f"{base_xp}/tr[3]/td[3]/strong").text_content()
                 download = raw_dl.split()[0]
-                raw_ul = self.driver.find_element(
-                    By.XPATH, f"{base_xp}/tr[4]/td[3]/strong"
-                ).text
+                raw_ul = self.page.locator(f"{base_xp}/tr[4]/td[3]/strong").text_content()
                 upload = raw_ul.split()[0]
-                raw_lat = self.driver.find_element(
-                    By.XPATH, f"{base_xp}/tr[5]/td[3]/strong"
-                ).text
+                raw_lat = self.page.locator(f"{base_xp}/tr[5]/td[3]/strong").text_content()
                 latency = raw_lat.split()[0]
-                raw_retr = self.driver.find_element(
-                    By.XPATH, f"{base_xp}/tr[6]/td[3]/strong"
-                ).text
+                raw_retr = self.page.locator(f"{base_xp}/tr[6]/td[3]/strong").text_content()
                 retrans = raw_retr.replace("%", "").strip()
 
                 logger.debug(
@@ -1144,9 +1061,8 @@ class SpeedtestZ:
             btn_selector = ".speedtest_start .btn-start"
 
             try:
-                start_btn = self.wait.until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, btn_selector))
-                )
+                start_btn = self.page.locator(btn_selector)
+                start_btn.wait_for(state="visible", timeout=self.timeout * 1000)
                 start_btn.click()
                 logger.info("usen: START")
             except Exception as e:
@@ -1155,38 +1071,51 @@ class SpeedtestZ:
                 return
 
             try:
-                WebDriverWait(self.driver, 10).until(
-                    lambda d: "speedtest_wait"
-                    in d.find_element(By.TAG_NAME, "body").get_attribute("class")
-                )
-                logger.info(
-                    "usen: Measuring... (speedtest_wait class detected)"
-                )
-            except TimeoutException:
+                # カスタム待機条件の実装
+                timeout_ms = 10000
+                start_time = time.time()
+                while time.time() - start_time < timeout_ms / 1000:
+                    body_class = self.page.locator("body").get_attribute("class") or ""
+                    if "speedtest_wait" in body_class:
+                        logger.info(
+                            "usen: Measuring... (speedtest_wait class detected)"
+                        )
+                        break
+                    time.sleep(0.5)
+                else:
+                    logger.warning(
+                        "usen: 'speedtest_wait' class did not appear. Starting anyway?"
+                    )
+            except Exception:
                 logger.warning(
                     "usen: 'speedtest_wait' class did not appear. Starting anyway?"
                 )
 
             logger.info("usen: Waiting for results (approx 60s)...")
             try:
-                WebDriverWait(self.driver, 120).until(
-                    lambda d: "speedtest_wait"
-                    not in d.find_element(By.TAG_NAME, "body").get_attribute(
-                        "class"
-                    )
-                )
+                # カスタム待機条件の実装
+                timeout_ms = 120000
+                start_time = time.time()
+                while time.time() - start_time < timeout_ms / 1000:
+                    body_class = self.page.locator("body").get_attribute("class") or ""
+                    if "speedtest_wait" not in body_class:
+                        break
+                    time.sleep(1)
+                else:
+                    raise PlaywrightTimeoutError("Timeout waiting for usen completion")
+                    
                 time.sleep(2)
                 logger.info("usen: COMPLETED (speedtest_wait class removed)")
-            except TimeoutException:
+            except PlaywrightTimeoutError:
                 logger.error("usen: Timeout waiting for completion.")
                 self.take_snapshot("usen_timeout")
                 return
 
             try:
-                download = self.driver.find_element(By.ID, "dlText").text
-                upload = self.driver.find_element(By.ID, "ulText").text
-                ping = self.driver.find_element(By.ID, "pingText").text
-                jitter = self.driver.find_element(By.ID, "jitText").text
+                download = self.page.locator("#dlText").text_content()
+                upload = self.page.locator("#ulText").text_content()
+                ping = self.page.locator("#pingText").text_content()
+                jitter = self.page.locator("#jitText").text_content()
 
                 logger.debug(
                     f"usen Result: {download=} {upload=} {ping=} {jitter=}"
@@ -1216,7 +1145,7 @@ class SpeedtestZ:
                 ]
                 self.send_to_zabbix(data)
 
-            except NoSuchElementException as e:
+            except Exception as e:
                 logger.error(f"usen: Result elements not found. {e}")
                 return
 
@@ -1239,28 +1168,33 @@ class SpeedtestZ:
                 "/html/body/div/astro-island/dialog/div/div/form/button[2]"
             )
             try:
-                start_btn = self.wait.until(
-                    EC.element_to_be_clickable((By.XPATH, start_xpath))
-                )
+                start_btn = self.page.locator(start_xpath)
+                start_btn.wait_for(state="visible", timeout=self.timeout * 1000)
                 start_btn.click()
                 logger.info("inonius: START")
-            except TimeoutException:
+            except PlaywrightTimeoutError:
                 logger.error("inonius: Start button not found.")
                 self.take_snapshot("inonius_error_start")
                 return
 
             try:
-                WebDriverWait(self.driver, 90).until(
-                    EC.text_to_be_present_in_element(
-                        (
-                            By.XPATH,
-                            "/html/body/div/astro-island/div/div[3]/div/span",
-                        ),
-                        "Test completed!",
-                    )
-                )
+                completion_xpath = "/html/body/div/astro-island/div/div[3]/div/span"
+                # カスタム待機条件の実装
+                timeout_ms = 90000
+                start_time = time.time()
+                while time.time() - start_time < timeout_ms / 1000:
+                    try:
+                        text = self.page.locator(completion_xpath).text_content()
+                        if "Test completed!" in text:
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(1)
+                else:
+                    raise PlaywrightTimeoutError("Timeout waiting for inonius completion")
+                    
                 logger.info("inonius: COMPLETED")
-            except TimeoutException:
+            except PlaywrightTimeoutError:
                 logger.error("inonius: Timeout waiting for completion.")
                 self.take_snapshot("inonius_timeout")
                 return
@@ -1281,7 +1215,7 @@ class SpeedtestZ:
             data = []
             for key_suffix, xpath in xpath_map.items():
                 try:
-                    val = self.driver.find_element(By.XPATH, xpath).text
+                    val = self.page.locator(xpath).text_content()
                     if key_suffix.endswith("_MSS"):
                         val = val.split()[-1]
                     if val:
@@ -1293,10 +1227,6 @@ class SpeedtestZ:
                                 "value": val,
                             }
                         )
-                except NoSuchElementException:
-                    logger.debug(
-                        f"inonius: Element not found for {key_suffix}"
-                    )
                 except Exception as e:
                     logger.warning(
                         f"inonius: Error processing {key_suffix}: {e}"
