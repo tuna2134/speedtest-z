@@ -34,12 +34,14 @@ speedtest-z automates major speed test sites with a web browser, capturing real 
 ## Prerequisites
 
 - Python >= 3.10
-- Google Chrome browser (not installable via pip -- must be installed separately)
+- Chromium browser (installed via Playwright)
 
 ## Installation
 
 ```bash
 pip install speedtest-z
+# Install Playwright browser
+python -m playwright install chromium
 ```
 
 ### Development Setup
@@ -50,11 +52,13 @@ cd speedtest-z
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -e .
+# Install Playwright browser
+python -m playwright install chromium
 ```
 
 ### Dependencies
 
-- [selenium](https://pypi.org/project/selenium/) -- Browser automation
+- [playwright](https://pypi.org/project/playwright/) -- Browser automation
 - [zappix](https://pypi.org/project/zappix/) -- Zabbix sender protocol
 
 ## Configuration
@@ -209,7 +213,7 @@ The `deploy/` directory contains systemd unit files for scheduled execution:
 |------|-------------|
 | `speedtest-z.service` | Service unit (runs `speedtest-z` from the venv) |
 | `speedtest-z.timer` | Timer unit (runs every 6 minutes) |
-| `SeleniumCleaner.cron` | Cron job to clean up stale Chrome temp files |
+| `SeleniumCleaner.cron` | Cron job to clean up stale Chromium temp files |
 
 ### Setup
 
@@ -227,7 +231,7 @@ systemctl --user status speedtest-z.timer
 systemctl --user list-timers
 ```
 
-Optionally, install the cron job for cleaning up stale Chrome temporary directories:
+Optionally, install the cron job for cleaning up stale Chromium temporary directories:
 
 ```bash
 sudo cp deploy/SeleniumCleaner.cron /etc/cron.d/SeleniumCleaner

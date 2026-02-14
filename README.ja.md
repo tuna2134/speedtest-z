@@ -23,12 +23,14 @@ speedtest-z は Web ブラウザで主要な速度テストサイトを自動巡
 ## 前提条件
 
 - Python >= 3.10
-- Google Chrome ブラウザ（pip ではインストールされません）
+- Chromium ブラウザ（Playwright 経由でインストール）
 
 ## インストール
 
 ```bash
 pip install speedtest-z
+# Playwright ブラウザのインストール
+python -m playwright install chromium
 ```
 
 ### 開発用インストール
@@ -39,11 +41,13 @@ cd speedtest-z
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -e .
+# Playwright ブラウザのインストール
+python -m playwright install chromium
 ```
 
 ### 依存ライブラリ
 
-- [selenium](https://pypi.org/project/selenium/) — ブラウザ自動操作
+- [playwright](https://pypi.org/project/playwright/) — ブラウザ自動操作
 - [zappix](https://pypi.org/project/zappix/) — Zabbix トラッパー送信
 
 ## 設定ファイル
@@ -225,9 +229,9 @@ systemctl status speedtest-z.timer
 systemctl list-timers speedtest-z.timer
 ```
 
-### Selenium クリーナー（cron）
+### ブラウザ一時ファイル クリーナー（cron）
 
-Chrome の一時ファイルを定期的に削除する cron 設定も含まれています。
+Chromium の一時ファイルを定期的に削除する cron 設定も含まれています。
 
 ```bash
 sudo cp deploy/SeleniumCleaner.cron /etc/cron.d/SeleniumCleaner
